@@ -1,0 +1,116 @@
+#When working with RFDiffusion3 (RFD3) via Foundry to redesign OATP1B1, several major debugging steps were required to get the pipeline running correctly.
+#1st: Realized that RFDiffusion3 is NOT a standalone Python package and cannot be imported directly.
+Tried:
+from rfdiffusion3.applications import rfdiffusion3
+from foundry.applications import rfdiffusion3
+Both resulted in ModuleNotFoundError.
+Key realization: RFD3 must be run through the CLI using "rfd3 design", not Python imports.
+#2nd: Installing Foundry correctly and avoiding misuse of the cloned repo.
+Tried:
+pip install -e src
+pip install -e models/rfd3
+These failed because the repo is not structured as an installable package.
+Correct install:
+pip install "rc-foundry[rfd3]"
+Verify install:
+python -m pip show rc-foundry
+#3rd: Disk quota issues required creating and using a conda environment in scratch space instead of home directory.
+cd /mnt/gs21/scratch/cordahlr
+mkdir -p conda_envs
+conda create -p /mnt/gs21/scratch/cordahlr/conda_envs/rfd3 python=3.12 -y
+conda activate /mnt/gs21/scratch/cordahlr/conda_envs/rfd3
+#4th: Understanding that RFD3 DOES NOT accept .pdb or .yaml files directly as inputs.
+Tried:
+inputs=oatp1b1_e3s_rfd.pdb
+Error:
+ValueError: Expected args to be a dictionary
+Tried YAML:
+ValidationError: Either 'input' or 'contig' / 'length' must be provided
+Key realization: inputs MUST be a JSON file containing a dictionary of design specifications.
+#5th: Correct JSON structure is required (NOT a list, must be a dictionary).
+Incorrect JSON caused:
+AttributeError: 'list' object has no attribute 'items'
+Correct JSON format example:
+{
+"oatp1b1_example": {
+"input_pdb": "/mnt/gs21/scratch/cordahlr/rfd3/inputs/oatp1b1/oatp1b1_e3s_rfd.pdb",
+"mode": "partial_diffusion",
+"fixed_backbone": true,
+"redesign_residues": [352, 356, 386, 422, 541, 544, 625],
+"ligand": {
+"present": true
+}
+}
+}
+#6th: Separating Hydra config from input data.
+Errors encountered:
+ConfigCompositionException: Could not override 'inference.num_designs'
+TypeError: unexpected keyword argument 'inference'
+Cause: Mixing runtime config with input JSON.
+Fix: JSON = inputs, CLI = config.
+#7th: Checkpoint handling must be done through Hydra CLI, NOT Python.
+Incorrect:
+RFD3InferenceEngine(checkpoint="...")
+Error:
+TypeError: unexpected keyword argument 'checkpoint'
+Correct usage:
+rfd3 design
++checkpoint=/mnt/gs21/scratch/cordahlr/foundry_ckpts/rfd3_latest.ckpt
+inputs=/mnt/gs21/scratch/cordahlr/rfd3/inputs/oatp1b1/oatp1b1.json
+out_dir=/mnt/gs21/scratch/cordahlr/rfd3/outputs
+prevalidate_inputs=True
+skip_existing=False
+#8th: Setting environment variables for checkpoint discovery and debugging.
+export HYDRA_FULL_ERROR=1
+export CUDA_LAUNCH_BLOCKING=0
+export FOUNDRY_CHECKPOINT_DIRS=/mnt/gs21/scratch/cordahlr/foundry_ckpts
+#9th: Full SLURM script used to run RFD3 on GPU.
+#!/bin/bash --login
+#SBATCH --job-name=rfd3_oatp1b1
+#SBATCH --output=logs/slurm/%x_%j.out
+#SBATCH --error=logs/slurm/%x_%j.err
+#SBATCH --time=08:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#SBATCH --gres=gpu:1
+set -euo pipefail
+module purge
+module load Miniforge3
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate /mnt/gs21/scratch/cordahlr/conda_envs/rfd3
+export HYDRA_FULL_ERROR=1
+export CUDA_LAUNCH_BLOCKING=0
+export FOUNDRY_CHECKPOINT_DIRS=/mnt/gs21/scratch/cordahlr/foundry_ckpts
+cd /mnt/gs21/scratch/cordahlr/rfd3
+mkdir -p logs/slurm outputs
+echo "Starting RFD3 run..."
+nvidia-smi
+rfd3 design
++checkpoint=/mnt/gs21/scratch/cordahlr/foundry_ckpts/rfd3_latest.ckpt
+out_dir=outputs/run_0
+inputs=inputs/oatp1b1/oatp1b1.json
+prevalidate_inputs=True
+low_memory_mode=True
+diffusion_batch_size=1
+n_batches=20
+skip_existing=False
+echo "Job complete."
+#10th: Current status / remaining issue.
+Environment is working
+CLI is working
+Checkpoint is accessible
+Remaining blocker:
+JSON input still has formatting or content issues
+Most recent error:
+ValidationError: Unsupported file type
+This likely means:
+- Incorrect file path inside JSON
+- Unsupported extension
+- Improper JSON structure
+#12th: Key takeaways for future runs.
+Always use CLI: rfd3 design
+Always use JSON for inputs
+Never pass checkpoint in Python
+Use +checkpoint= with Hydra
+Keep environments in scratch to avoid quota issues
+Validate JSON before running
